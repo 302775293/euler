@@ -1,62 +1,70 @@
+import logging
+
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
-from transformers import BertTokenizer
+from torch.utils.data import Dataset, DataLoader
+
+logger = logging.getLogger(__name__)
 
 
 class TextClassificationDataset(Dataset):
     """CSV格式文本分类数据集。
 
-    CSV文件应包含至少两列：文本列和标签列。
-    标签可以是整数（0~num_labels-1）或字符串（自动映射为整数）。
+    在 __init__ 阶段对全部文本进行 tokenize，
+    __getitem__ 只做张量切片，大幅减少训练时的开销。
     """
 
     def __init__(self, csv_path, tokenizer, max_length, text_column="text",
                  label_column="label", label2id=None):
-        self.df = pd.read_csv(csv_path)
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.text_column = text_column
-        self.label_column = label_column
-        self.label2id = label2id
+        self.csv_path = csv_path
+        df = pd.read_csv(csv_path)
 
-        self.texts = self.df[self.text_column].astype(str).tolist()
-        raw_labels = self.df[self.label_column].tolist()
+        if text_column not in df.columns:
+            raise ValueError(f"CSV 缺少文本列 '{text_column}'，可用列: {list(df.columns)}")
+        if label_column not in df.columns:
+            raise ValueError(f"CSV 缺少标签列 '{label_column}'，可用列: {list(df.columns)}")
 
-        if self.label2id is not None:
-            self.labels = [self.label2id[str(l)] for l in raw_labels]
+        texts = df[text_column].fillna("").astype(str).tolist()
+        raw_labels = df[label_column].tolist()
+
+        if label2id is not None:
+            self.labels = [label2id[str(l)] for l in raw_labels]
         else:
             self.labels = [int(l) for l in raw_labels]
 
-    def __len__(self):
-        return len(self.texts)
+        num_classes = len(set(self.labels))
+        logger.info("加载 %s: %d 条样本, %d 个类别", csv_path, len(texts), num_classes)
 
-    def __getitem__(self, idx):
-        text = self.texts[idx]
-        label = self.labels[idx]
-
-        encoding = self.tokenizer(
-            text,
-            max_length=self.max_length,
+        self.encodings = tokenizer(
+            texts,
+            max_length=max_length,
             padding="max_length",
             truncation=True,
             return_tensors="pt",
         )
 
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
         return {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-            "token_type_ids": encoding["token_type_ids"].squeeze(0),
-            "label": torch.tensor(label, dtype=torch.long),
+            "input_ids": self.encodings["input_ids"][idx],
+            "attention_mask": self.encodings["attention_mask"][idx],
+            "token_type_ids": self.encodings["token_type_ids"][idx],
+            "label": torch.tensor(self.labels[idx], dtype=torch.long),
         }
 
 
+def _detect_string_labels(df, label_column, sample_size=20):
+    """检测标签列是否包含非数字字符串。"""
+    sample = df[label_column].head(sample_size)
+    return any(isinstance(l, str) and not l.isdigit() for l in sample)
+
+
 def build_dataloader(csv_path, tokenizer, config, shuffle=True):
-    """构建 DataLoader。"""
-    label2id = None
-    if any(isinstance(l, str) and not l.isdigit()
-           for l in pd.read_csv(csv_path)[config.label_column].head(10)):
-        label2id = config.label2id()
+    """构建 DataLoader，自动检测标签类型。"""
+    df = pd.read_csv(csv_path)
+    label2id = config.label2id() if _detect_string_labels(df, config.label_column) else None
 
     dataset = TextClassificationDataset(
         csv_path=csv_path,
@@ -67,10 +75,11 @@ def build_dataloader(csv_path, tokenizer, config, shuffle=True):
         label2id=label2id,
     )
 
-    return torch.utils.data.DataLoader(
+    return DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=shuffle,
-        num_workers=0,
+        num_workers=getattr(config, "num_workers", 0),
         pin_memory=True,
+        drop_last=False,
     )
