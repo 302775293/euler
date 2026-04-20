@@ -472,60 +472,6 @@ def produce_boss_features():
     return main_df
 
 
-# 历史是否有过合作、当前有没有在合作中、历史合作次数、历史总金额、还有多长时间到期
-# 是否301期
-def produce_base_renew_feas(main_df):
-    main_df.createOrReplaceTempView('mains')
-
-    main_df = spark.sql('''\
-        select t1.*,
-            nvl(t2.coop_cnts, 0)        as coop_cnts,
-            nvl(t2.coop_price, 0)       as coop_price,
-            if(t2.coop_cnts > 0, 1, 0)  as history_coop_flag,
-            if(t2.coop_flag > 0, 1, 0)  as now_coop_flag,
-            if(t2.301_flag > 0, 1, 0)   as 301_flag,
-            nvl(t2.finish_days, -9999)   as finish_days
-        from
-        (
-            select *
-            from mains
-        ) t1
-        left join
-        (
-            select t1.boss_id,
-                count(distinct t2.order_number)    as coop_cnts,
-                cast(sum(t2.price) / 10000 as bigint) as coop_price,
-                sum(coop_flag)   as coop_flag,
-                sum(301_flag)    as 301_flag,
-                max(finish_days) as finish_days
-            from
-            (
-                select *
-                from mains
-            ) t1
-            left join
-            (
-                select *,
-                    if(contract_end >= '{yesterday}', 1, 0) as coop_flag,
-                    if(
-                        months_between(
-                            concat(substring('{yesterday}', 1, 7), '-01'),
-                            concat(substring(contract_end, 1, 7), '-01')
-                        ) in (1, 0, -1, -2, -3), 1, 0
-                    ) as 301_flag,
-                    datediff(contract_end, '{yesterday}') as finish_days
-                from price_calc.lzb_company_base_contract_order_final
-                where ds = '{yesterday}'
-            ) t2
-            on t1.company_id = t2.company_id
-            group by t1.boss_id
-        ) t2
-        on t1.boss_id = t2.boss_id
-        '''.format(yesterday=yesterday)).persist()
-
-    return main_df
-
-
 def insert_table(main_df):
 
     main_df = main_df.repartition(10)
@@ -579,13 +525,6 @@ def insert_table(main_df):
             pas_success_num_180,
             total_addf_num_180,
             total_success_num_180,
-
-            coop_cnts,
-            coop_price,
-            history_coop_flag,
-            now_coop_flag,
-            301_flag,
-            finish_days,
 
             online_cost_30_chain,
             online_cost_90_chain,
@@ -783,8 +722,6 @@ if __name__ == '__main__':
 
     print('get boss features......')
     main_df = produce_boss_features()
-
-    main_df = produce_base_renew_feas(main_df)
 
     print('insert table...........')
     insert_table(main_df)
